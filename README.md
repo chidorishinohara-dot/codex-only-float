@@ -4,6 +4,10 @@ A small Windows floating window for checking Codex usage.
 
 It is intentionally minimal: one compact always-on-top Tkinter window, Codex-only data, no provider system, no browser cookie extraction, and no background service.
 
+## Preview
+
+![codex-only-float preview](assets/preview.png)
+
 ## Features
 
 - Shows Codex session and weekly usage.
