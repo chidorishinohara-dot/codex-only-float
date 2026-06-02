@@ -402,7 +402,7 @@ class CodexFloat(tk.Tk):
 
         footer = tk.Frame(self.content, bg=PANEL_BG)
         footer.pack(fill="x", pady=(4, 0))
-        self.make_button(footer, "鈫?, self.refresh_now).pack(side="left")
+        self.make_button(footer, "↻", self.refresh_now).pack(side="left")
         self.bind_drag_recursive(self)
         self.close_btn.bind("<Button-1>", lambda _event: self.close())
 
