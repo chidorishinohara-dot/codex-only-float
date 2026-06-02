@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import ssl
 import subprocess
 import time
 import tkinter as tk
@@ -227,6 +228,11 @@ def parse_usage_json(data: dict[str, Any]) -> UsageInfo:
     )
 
 
+def is_transient_network_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, (TimeoutError, ssl.SSLError)) or "eof occurred" in text or "unexpected_eof" in text
+
+
 def fetch_usage() -> UsageInfo:
     token, account_id = load_credentials()
     headers = {
@@ -237,16 +243,30 @@ def fetch_usage() -> UsageInfo:
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
     request = urllib.request.Request(USAGE_URL, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise RuntimeError("Codex login expired. Run codex login again.") from exc
-        raise RuntimeError(f"Codex API returned HTTP {exc.code}.") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Network error: {exc.reason}") from exc
-    return parse_usage_json(json.loads(body))
+    last_network_error: BaseException | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = response.read().decode("utf-8")
+            return parse_usage_json(json.loads(body))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise RuntimeError("Codex login expired. Run codex login again.") from exc
+            raise RuntimeError(f"Codex API returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            reason = exc.reason if isinstance(exc.reason, BaseException) else exc
+            last_network_error = reason
+            if attempt < 2 and is_transient_network_error(reason):
+                time.sleep(1.5)
+                continue
+            raise RuntimeError("Network temporarily unavailable. Retrying automatically.") from exc
+        except (TimeoutError, ssl.SSLError) as exc:
+            last_network_error = exc
+            if attempt < 2:
+                time.sleep(1.5)
+                continue
+            raise RuntimeError("Network temporarily unavailable. Retrying automatically.") from exc
+    raise RuntimeError("Network temporarily unavailable. Retrying automatically.") from last_network_error
 
 
 def codex_is_running() -> bool:
@@ -313,6 +333,8 @@ class CodexFloat(tk.Tk):
         self.drag_offset: tuple[int, int] | None = None
         self.refresh_after_id: str | None = None
         self.codex_miss_count = 0
+        self.last_usage: UsageInfo | None = None
+        self.network_error_count = 0
         self.title("Codex quota")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{self.config_data['x']}+{self.config_data['y']}")
         self.resizable(False, False)
@@ -371,7 +393,7 @@ class CodexFloat(tk.Tk):
         self.plan_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
         self.status_label = tk.Label(header, text="", width=5, bg=PANEL_BG, fg=MUTED, font=(FONT, BODY_SIZE))
         self.status_label.grid(row=0, column=2, sticky="w", padx=(8, 0))
-        self.close_btn = tk.Label(header, text="×", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 18), cursor="hand2")
+        self.close_btn = tk.Label(header, text="脳", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 18), cursor="hand2")
         self.close_btn.grid(row=0, column=4, sticky="e")
         self.close_btn.bind("<Button-1>", lambda _event: self.close())
 
@@ -380,7 +402,7 @@ class CodexFloat(tk.Tk):
 
         footer = tk.Frame(self.content, bg=PANEL_BG)
         footer.pack(fill="x", pady=(4, 0))
-        self.make_button(footer, "↻", self.refresh_now).pack(side="left")
+        self.make_button(footer, "鈫?, self.refresh_now).pack(side="left")
         self.bind_drag_recursive(self)
         self.close_btn.bind("<Button-1>", lambda _event: self.close())
 
@@ -441,7 +463,7 @@ class CodexFloat(tk.Tk):
         try:
             usage = fetch_usage()
         except Exception as exc:
-            self.render_error(str(exc))
+            self.render_fetch_error(str(exc))
         else:
             self.render_usage(usage)
         self.schedule_refresh()
@@ -451,6 +473,8 @@ class CodexFloat(tk.Tk):
             child.destroy()
 
     def render_usage(self, usage: UsageInfo):
+        self.last_usage = usage
+        self.network_error_count = 0
         self.clear_rows()
         self.plan_label.config(text=usage.plan)
         windows = [usage.primary]
@@ -464,6 +488,15 @@ class CodexFloat(tk.Tk):
         if usage.credits:
             self.add_note(usage.credits)
         self.status_label.config(text=time.strftime("%H:%M"))
+
+    def render_fetch_error(self, message: str):
+        is_network = "Network temporarily unavailable" in message
+        if is_network and self.last_usage:
+            self.network_error_count += 1
+            self.plan_label.config(text=self.last_usage.plan)
+            self.status_label.config(text="retry")
+            return
+        self.render_error(message)
 
     def add_usage_row(self, info: WindowInfo):
         row = tk.Frame(self.rows_frame, bg=PANEL_BG)
@@ -491,6 +524,8 @@ class CodexFloat(tk.Tk):
     def render_error(self, message: str):
         self.clear_rows()
         self.plan_label.config(text="Error")
+        if "Network temporarily unavailable" in message:
+            message = "Network temporarily unavailable.\nAuto-refresh will retry."
         tk.Label(
             self.rows_frame,
             text=message,
